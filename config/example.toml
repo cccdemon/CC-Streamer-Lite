@@ -1,0 +1,29 @@
+[video]
+width = 1920
+height = 1080
+fps = 30
+bitrate_kbps = 6000
+encoder = "auto"
+
+[audio]
+codec = "opus"
+bitrate_kbps = 128
+sample_rate = 48000
+channels = 2
+
+[[outputs]]
+name = "primary"
+enabled = true
+protocol = "srt"
+url = "srt://stream.example.com:8890?streamid=publish:live/main"
+stream_key = ""
+srt_passphrase = ""
+
+[[outputs]]
+name = "backup"
+enabled = false
+protocol = "srt"
+url = "srt://backup.example.com:8890?streamid=publish:live/main"
+stream_key = ""
+srt_passphrase = ""
+
