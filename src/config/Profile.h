@@ -19,6 +19,7 @@ struct VideoProfile {
     std::string codec = "h264";
     std::string encoder = "hardware-auto";
     std::string colorMode = "yuv";
+    std::string colorMatrix = "bt709";
     std::string colorRange = "limited";
 };
 

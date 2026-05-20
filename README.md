@@ -16,3 +16,5 @@ See:
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
 - [docs/dev-setup.md](docs/dev-setup.md)
 - [docs/handovers](docs/handovers/README.md)
+- [docs/streaming-implementation.md](docs/streaming-implementation.md)
+- [docs/mobile-app-plan.md](docs/mobile-app-plan.md)

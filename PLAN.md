@@ -30,7 +30,7 @@ Use a native C++ application with:
   - FFmpeg libraries for muxing, transport, Opus audio, and fallback software video encode.
   - Hardware video encode where available: NVENC, Intel QSV, AMD AMF.
   - Default video codec: H.264.
-  - Default color pipeline: YUV limited range, configurable to full range.
+  - Default color pipeline: YUV BT.709 limited range, configurable to BT.601 and full range.
 - Streaming protocol:
   - Prefer SRT or RTSP/RTP for MediaMTX when Opus is required.
 - WHIP/WebRTC is a good later target if browser playback and low latency are important.

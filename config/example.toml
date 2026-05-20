@@ -6,6 +6,7 @@ bitrate_kbps = 6000
 codec = "h264"
 encoder = "hardware-auto"
 color_mode = "yuv"
+color_matrix = "bt709"
 color_range = "limited"
 
 [audio]
@@ -18,16 +19,16 @@ channels = 2
 name = "window"
 enabled = true
 protocol = "srt"
-url = "srt://stream.example.com:8890?streamid=publish:live/main"
+url = "srt://85.215.253.135:8893?streamid=publish:jericho_game&pkt_size=1316"
 stream_key = ""
 srt_passphrase = ""
-webrtc_endpoint = "http://stream.example.com:8889/live/window/whip"
+webrtc_endpoint = ""
 
 [[outputs]]
 name = "camera"
 enabled = false
 protocol = "srt"
-url = "srt://backup.example.com:8890?streamid=publish:live/main"
+url = "srt://85.215.253.135:8892?streamid=publish:headwig_game&pkt_size=1316"
 stream_key = ""
 srt_passphrase = ""
 webrtc_endpoint = ""

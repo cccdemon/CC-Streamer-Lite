@@ -31,6 +31,15 @@ cmake --build --preset vs2019-x64-debug
 .\build\vs2019-x64\Debug\CCStreamer.exe
 ```
 
+## Logs
+
+Runtime logs are written next to the executable:
+
+```text
+build\vs2019-x64\Debug\CCStreamer.log
+build\vs2019-x64\Release\CCStreamer.log
+```
+
 ## Notes
 
 The current app is a Win32 foundation shell. Capture, encoding, and streaming modules are intentionally not implemented yet.

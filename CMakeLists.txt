@@ -23,6 +23,8 @@ add_executable(CCStreamer WIN32
     src/config/Profile.h
     src/logging/Logger.cpp
     src/logging/Logger.h
+    src/streaming/FfmpegPublisher.cpp
+    src/streaming/FfmpegPublisher.h
 )
 
 target_include_directories(CCStreamer
@@ -40,6 +42,8 @@ target_link_libraries(CCStreamer
         mfreadwrite
         mfuuid
         ole32
+        comctl32
+        urlmon
 )
 
 if(Vulkan_FOUND)

@@ -26,6 +26,22 @@ std::wstring hrText(const wchar_t* context, HRESULT result)
     return buffer;
 }
 
+bool isCameraBusyResult(HRESULT result)
+{
+    return result == MF_E_HW_MFT_FAILED_START_STREAMING
+        || result == HRESULT_FROM_WIN32(ERROR_BUSY)
+        || result == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+}
+
+std::wstring cameraReadFailureText(HRESULT result)
+{
+    if (isCameraBusyResult(result)) {
+        return L"Camera read failed: camera is likely already in use by another app or driver transform";
+    }
+
+    return hrText(L"ReadSample", result);
+}
+
 std::wstring getAllocatedString(IMFActivate* activate, const GUID& key)
 {
     wchar_t* value = nullptr;
@@ -57,6 +73,23 @@ std::wstring formatLabel(UINT32 width, UINT32 height, UINT32 fpsNumerator, UINT3
     wchar_t buffer[160] {};
     swprintf_s(buffer, L"%ux%u @ %u fps - %s", width, height, fps, subtypeName(subtype).c_str());
     return buffer;
+}
+
+std::wstring mediaTypeSummary(IMFMediaType* type)
+{
+    if (type == nullptr) {
+        return L"<none>";
+    }
+
+    GUID subtype {};
+    UINT32 width = 0;
+    UINT32 height = 0;
+    UINT32 fpsNumerator = 0;
+    UINT32 fpsDenominator = 1;
+    type->GetGUID(MF_MT_SUBTYPE, &subtype);
+    MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width, &height);
+    MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &fpsNumerator, &fpsDenominator);
+    return formatLabel(width, height, fpsNumerator, fpsDenominator, subtype);
 }
 
 ComPtr<IMFMediaType> createRgb32MediaType()
@@ -107,9 +140,211 @@ RECT fitRectToAspect(const RECT& bounds, LONG aspectWidth, LONG aspectHeight)
     return { left, top, left + width, top + height };
 }
 
+BYTE clampByte(int value)
+{
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return static_cast<BYTE>(value);
+}
+
+void yuvToBgraLimitedBt709(int yValue, int uValue, int vValue, BYTE* target)
+{
+    const int c = yValue - 16;
+    const int d = uValue - 128;
+    const int e = vValue - 128;
+
+    const int r = (298 * c + 459 * e + 128) >> 8;
+    const int g = (298 * c - 55 * d - 136 * e + 128) >> 8;
+    const int b = (298 * c + 541 * d + 128) >> 8;
+
+    target[0] = clampByte(b);
+    target[1] = clampByte(g);
+    target[2] = clampByte(r);
+    target[3] = 0;
+}
+
+void yuvToBgraLimitedBt601(int yValue, int uValue, int vValue, BYTE* target)
+{
+    const int c = yValue - 16;
+    const int d = uValue - 128;
+    const int e = vValue - 128;
+
+    const int r = (298 * c + 409 * e + 128) >> 8;
+    const int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+    const int b = (298 * c + 516 * d + 128) >> 8;
+
+    target[0] = clampByte(b);
+    target[1] = clampByte(g);
+    target[2] = clampByte(r);
+    target[3] = 0;
+}
+
+void yuvToBgraFullBt709(int yValue, int uValue, int vValue, BYTE* target)
+{
+    const int d = uValue - 128;
+    const int e = vValue - 128;
+
+    const int r = yValue + ((403 * e + 128) >> 8);
+    const int g = yValue - ((48 * d + 120 * e + 128) >> 8);
+    const int b = yValue + ((475 * d + 128) >> 8);
+
+    target[0] = clampByte(b);
+    target[1] = clampByte(g);
+    target[2] = clampByte(r);
+    target[3] = 0;
+}
+
+void yuvToBgraFullBt601(int yValue, int uValue, int vValue, BYTE* target)
+{
+    const int d = uValue - 128;
+    const int e = vValue - 128;
+
+    const int r = yValue + ((359 * e + 128) >> 8);
+    const int g = yValue - ((88 * d + 183 * e + 128) >> 8);
+    const int b = yValue + ((454 * d + 128) >> 8);
+
+    target[0] = clampByte(b);
+    target[1] = clampByte(g);
+    target[2] = clampByte(r);
+    target[3] = 0;
+}
+
+void yuvToBgra(int yValue, int uValue, int vValue, bool fullRange, YuvMatrix matrix, BYTE* target)
+{
+    if (matrix == YuvMatrix::Bt601) {
+        if (fullRange) {
+            yuvToBgraFullBt601(yValue, uValue, vValue, target);
+        } else {
+            yuvToBgraLimitedBt601(yValue, uValue, vValue, target);
+        }
+        return;
+    }
+
+    if (fullRange) {
+        yuvToBgraFullBt709(yValue, uValue, vValue, target);
+    } else {
+        yuvToBgraLimitedBt709(yValue, uValue, vValue, target);
+    }
+}
+
+bool copyBgraWithStride(IMFMediaBuffer* buffer, LONG width, LONG height, std::vector<BYTE>& output)
+{
+    BYTE* data = nullptr;
+    LONG stride = 0;
+    ComPtr<IMF2DBuffer> buffer2d;
+
+    output.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+
+    if (SUCCEEDED(buffer->QueryInterface(IID_PPV_ARGS(&buffer2d))) && SUCCEEDED(buffer2d->Lock2D(&data, &stride))) {
+        const LONG absoluteStride = stride < 0 ? -stride : stride;
+        if (absoluteStride < width * 4) {
+            buffer2d->Unlock2D();
+            return false;
+        }
+
+        for (LONG y = 0; y < height; ++y) {
+            const BYTE* source = stride >= 0
+                ? data + (static_cast<size_t>(y) * absoluteStride)
+                : data + (static_cast<size_t>(height - 1 - y) * absoluteStride);
+            BYTE* target = output.data() + (static_cast<size_t>(y) * width * 4);
+            std::memcpy(target, source, static_cast<size_t>(width) * 4);
+        }
+
+        buffer2d->Unlock2D();
+        return true;
+    }
+
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    if (FAILED(buffer->Lock(&data, &maxLength, &currentLength))) {
+        return false;
+    }
+
+    const size_t required = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    if (currentLength >= required) {
+        std::memcpy(output.data(), data, required);
+    }
+    buffer->Unlock();
+    return currentLength >= required;
+}
+
+bool convertNv12ToBgra(IMFMediaBuffer* buffer, LONG width, LONG height, bool fullRange, YuvMatrix matrix, std::vector<BYTE>& output)
+{
+    BYTE* data = nullptr;
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    if (FAILED(buffer->Lock(&data, &maxLength, &currentLength))) {
+        return false;
+    }
+
+    const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t uvPlaneSize = yPlaneSize / 2;
+    if (currentLength < yPlaneSize + uvPlaneSize) {
+        buffer->Unlock();
+        return false;
+    }
+
+    const BYTE* yPlane = data;
+    const BYTE* uvPlane = data + yPlaneSize;
+    output.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+
+    for (LONG y = 0; y < height; ++y) {
+        for (LONG x = 0; x < width; ++x) {
+            const int yValue = yPlane[static_cast<size_t>(y) * width + x];
+            const size_t uvIndex = static_cast<size_t>(y / 2) * width + static_cast<size_t>(x & ~1);
+            const int uValue = uvPlane[uvIndex + 0];
+            const int vValue = uvPlane[uvIndex + 1];
+            BYTE* target = output.data() + ((static_cast<size_t>(y) * width + x) * 4);
+            yuvToBgra(yValue, uValue, vValue, fullRange, matrix, target);
+        }
+    }
+
+    buffer->Unlock();
+    return true;
+}
+
+bool convertYuy2ToBgra(IMFMediaBuffer* buffer, LONG width, LONG height, bool fullRange, YuvMatrix matrix, std::vector<BYTE>& output)
+{
+    BYTE* data = nullptr;
+    DWORD maxLength = 0;
+    DWORD currentLength = 0;
+    if (FAILED(buffer->Lock(&data, &maxLength, &currentLength))) {
+        return false;
+    }
+
+    const size_t required = static_cast<size_t>(width) * static_cast<size_t>(height) * 2;
+    if (currentLength < required) {
+        buffer->Unlock();
+        return false;
+    }
+
+    output.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+
+    for (LONG y = 0; y < height; ++y) {
+        const BYTE* source = data + (static_cast<size_t>(y) * width * 2);
+        for (LONG x = 0; x < width; x += 2) {
+            const int y0 = source[0];
+            const int u = source[1];
+            const int y1 = source[2];
+            const int v = source[3];
+            BYTE* target0 = output.data() + ((static_cast<size_t>(y) * width + x) * 4);
+            BYTE* target1 = output.data() + ((static_cast<size_t>(y) * width + x + 1) * 4);
+            yuvToBgra(y0, u, v, fullRange, matrix, target0);
+            if (x + 1 < width) {
+                yuvToBgra(y1, u, v, fullRange, matrix, target1);
+            }
+            source += 4;
+        }
+    }
+
+    buffer->Unlock();
+    return true;
+}
+
 }
 
 MediaFoundationCamera::MediaFoundationCamera()
+    : logger_("MediaFoundationCamera")
 {
     MFStartup(MF_VERSION, MFSTARTUP_LITE);
 }
@@ -206,7 +441,7 @@ std::vector<CameraFormat> MediaFoundationCamera::enumerateFormats(const CameraDe
     return formats;
 }
 
-bool MediaFoundationCamera::startPreview(const CameraDevice& device, HWND targetWindow, int formatIndex)
+bool MediaFoundationCamera::startPreview(const CameraDevice& device, HWND targetWindow, int formatIndex, bool fullRange, YuvMatrix matrix)
 {
     if (targetWindow == nullptr || device.symbolicLink.empty()) {
         setError(L"Invalid camera target or device link");
@@ -216,7 +451,7 @@ bool MediaFoundationCamera::startPreview(const CameraDevice& device, HWND target
     stopPreview();
     setError(L"");
     running_ = true;
-    previewThread_ = std::thread(&MediaFoundationCamera::previewLoop, this, device, targetWindow, formatIndex);
+    previewThread_ = std::thread(&MediaFoundationCamera::previewLoop, this, device, targetWindow, formatIndex, fullRange, matrix);
     return true;
 }
 
@@ -228,6 +463,12 @@ void MediaFoundationCamera::stopPreview()
     }
 }
 
+void MediaFoundationCamera::setFrameCallback(std::function<void(const BYTE*, LONG, LONG)> callback)
+{
+    std::lock_guard<std::mutex> lock(callbackMutex_);
+    frameCallback_ = std::move(callback);
+}
+
 std::wstring MediaFoundationCamera::lastError() const
 {
     return lastError_;
@@ -236,9 +477,12 @@ std::wstring MediaFoundationCamera::lastError() const
 void MediaFoundationCamera::setError(std::wstring message)
 {
     lastError_ = std::move(message);
+    if (!lastError_.empty()) {
+        logger_.error(lastError_);
+    }
 }
 
-void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, int formatIndex)
+void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, int formatIndex, bool fullRange, YuvMatrix matrix)
 {
     const HRESULT coResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool shouldUninitializeCom = SUCCEEDED(coResult);
@@ -253,8 +497,9 @@ void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, 
         setError(L"MFCreateDeviceSource failed");
     }
 
-    if (SUCCEEDED(MFCreateAttributes(&readerAttributes, 1))) {
-        readerAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    if (SUCCEEDED(MFCreateAttributes(&readerAttributes, 2))) {
+        readerAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
+        readerAttributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, FALSE);
     }
 
     result = mediaSource != nullptr ? MFCreateSourceReaderFromMediaSource(mediaSource.Get(), readerAttributes.Get(), &reader) : E_FAIL;
@@ -273,6 +518,7 @@ void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, 
         ComPtr<IMFMediaType> nativeType;
         result = reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), static_cast<DWORD>(formatIndex), &nativeType);
         if (SUCCEEDED(result) && nativeType != nullptr) {
+            logger_.info(L"Requested camera format: " + mediaTypeSummary(nativeType.Get()));
             result = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, nativeType.Get());
             if (FAILED(result)) {
                 setError(hrText(L"Set selected camera format", result));
@@ -280,15 +526,37 @@ void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, 
         }
     }
 
-    const auto rgb32Type = createRgb32MediaType();
-    if (rgb32Type != nullptr) {
-        result = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, rgb32Type.Get());
-        if (FAILED(result)) {
-            setError(hrText(L"Set RGB32 camera preview format", result));
-            running_ = false;
+    bool explicitYuvConversion = false;
+    GUID selectedSubtype = {};
+    UINT32 selectedWidth = 0;
+    UINT32 selectedHeight = 0;
+    {
+        ComPtr<IMFMediaType> selectedType;
+        if (SUCCEEDED(reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &selectedType)) && selectedType != nullptr) {
+            logger_.info(L"Active camera format before preview conversion: " + mediaTypeSummary(selectedType.Get()));
+            selectedType->GetGUID(MF_MT_SUBTYPE, &selectedSubtype);
+            MFGetAttributeSize(selectedType.Get(), MF_MT_FRAME_SIZE, &selectedWidth, &selectedHeight);
+            explicitYuvConversion = selectedSubtype == MFVideoFormat_NV12 || selectedSubtype == MFVideoFormat_YUY2;
         }
     }
 
+    const bool requiresSourceReaderDecode = selectedSubtype == MFVideoFormat_MJPG;
+    const auto rgb32Type = createRgb32MediaType();
+    if (rgb32Type != nullptr && requiresSourceReaderDecode) {
+        logger_.info(L"MJPG camera format selected; requesting software decode to RGB32 for preview");
+        result = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, rgb32Type.Get());
+        if (FAILED(result)) {
+            setError(hrText(L"Set RGB32 camera preview format", result));
+        } else {
+            ComPtr<IMFMediaType> previewType;
+            if (SUCCEEDED(reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &previewType)) && previewType != nullptr) {
+                logger_.info(L"Active camera preview format: " + mediaTypeSummary(previewType.Get()));
+            }
+        }
+    }
+
+    int failedConversionCount = 0;
+    bool loggedConversionFailure = false;
     while (running_) {
         DWORD streamIndex = 0;
         DWORD flags = 0;
@@ -305,10 +573,13 @@ void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, 
 
         if (FAILED(readResult) || (flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
             if (FAILED(readResult)) {
-                setError(hrText(L"ReadSample", readResult));
+                setError(cameraReadFailureText(readResult));
+                SetWindowTextW(targetWindow, isCameraBusyResult(readResult)
+                    ? L"Camera is already in use by another app"
+                    : L"Camera preview failed");
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            continue;
+            running_ = false;
+            break;
         }
 
         if (sample == nullptr) {
@@ -331,33 +602,28 @@ void MediaFoundationCamera::previewLoop(CameraDevice device, HWND targetWindow, 
             continue;
         }
 
-        BYTE* data = nullptr;
-        LONG stride = 0;
-        ComPtr<IMF2DBuffer> buffer2d;
-        if (SUCCEEDED(buffer.As(&buffer2d)) && SUCCEEDED(buffer2d->Lock2D(&data, &stride))) {
-            if (stride < static_cast<LONG>(width * 4)) {
-                buffer2d->Unlock2D();
-                continue;
-            }
+        GUID currentSubtype = {};
+        currentType->GetGUID(MF_MT_SUBTYPE, &currentSubtype);
 
-            std::vector<BYTE> packed(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-            const LONG sourceStride = stride;
-            const LONG absoluteStride = sourceStride < 0 ? -sourceStride : sourceStride;
-            for (UINT32 y = 0; y < height; ++y) {
-                const BYTE* source = sourceStride >= 0
-                    ? data + (static_cast<size_t>(y) * absoluteStride)
-                    : data + (static_cast<size_t>(height - 1 - y) * absoluteStride);
-                BYTE* target = packed.data() + (static_cast<size_t>(y) * width * 4);
-                std::memcpy(target, source, static_cast<size_t>(width) * 4);
+        std::vector<BYTE> bgra;
+        if (convertFrameToBgra(buffer.Get(), currentSubtype, static_cast<LONG>(width), static_cast<LONG>(height), fullRange, matrix, bgra)) {
+            failedConversionCount = 0;
+            {
+                std::lock_guard<std::mutex> lock(callbackMutex_);
+                if (frameCallback_) {
+                    frameCallback_(bgra.data(), static_cast<LONG>(width), static_cast<LONG>(height));
+                }
             }
-            buffer2d->Unlock2D();
-            drawFrame(targetWindow, packed.data(), static_cast<LONG>(width), static_cast<LONG>(height), static_cast<LONG>(width * 4));
+            drawFrame(targetWindow, bgra.data(), static_cast<LONG>(width), static_cast<LONG>(height), static_cast<LONG>(width * 4));
         } else {
-            DWORD maxLength = 0;
-            DWORD currentLength = 0;
-            if (SUCCEEDED(buffer->Lock(&data, &maxLength, &currentLength))) {
-                drawFrame(targetWindow, data, static_cast<LONG>(width), static_cast<LONG>(height), static_cast<LONG>(width * 4));
-                buffer->Unlock();
+            ++failedConversionCount;
+            if (!loggedConversionFailure) {
+                loggedConversionFailure = true;
+                logger_.error(L"Unsupported camera buffer for selected native format: " + subtypeName(currentSubtype));
+                SetWindowTextW(targetWindow, L"Unsupported camera format for preview");
+            }
+            if (failedConversionCount >= 10) {
+                running_ = false;
             }
         }
     }
@@ -435,6 +701,23 @@ void MediaFoundationCamera::drawFrame(HWND targetWindow, const BYTE* data, LONG 
     DeleteObject(memoryBitmap);
     DeleteDC(memoryDc);
     ReleaseDC(targetWindow, dc);
+}
+
+bool MediaFoundationCamera::convertFrameToBgra(IMFMediaBuffer* buffer, const GUID& subtype, LONG width, LONG height, bool fullRange, YuvMatrix matrix, std::vector<BYTE>& output)
+{
+    if (buffer == nullptr || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    if (subtype == MFVideoFormat_NV12) {
+        return convertNv12ToBgra(buffer, width, height, fullRange, matrix, output);
+    }
+
+    if (subtype == MFVideoFormat_YUY2) {
+        return convertYuy2ToBgra(buffer, width, height, fullRange, matrix, output);
+    }
+
+    return copyBgraWithStride(buffer, width, height, output);
 }
 
 } // namespace ccstreamer

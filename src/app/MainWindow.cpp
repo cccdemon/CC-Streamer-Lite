@@ -21,6 +21,8 @@ constexpr int ControlIdVideoCodec = 109;
 constexpr int ControlIdHardwareAccel = 110;
 constexpr int ControlIdColorMode = 111;
 constexpr int ControlIdColorRange = 112;
+constexpr int ControlIdColorMatrix = 113;
+constexpr UINT MessageStartupChecks = WM_APP + 1;
 constexpr int PickerIdList = 201;
 constexpr int PickerIdPreview = 202;
 constexpr int PickerIdOk = 203;
@@ -63,6 +65,8 @@ struct PickerState {
     HWND preview = nullptr;
     HTHUMBNAIL thumbnail = nullptr;
     MediaFoundationCamera* cameraPreviewEngine = nullptr;
+    bool fullRange = false;
+    YuvMatrix matrix = YuvMatrix::Bt709;
     std::vector<WindowCandidate> windows;
     std::vector<CameraDevice> cameras;
     std::vector<CameraFormat> cameraFormats;
@@ -159,7 +163,7 @@ void updateCameraPickerPreview(PickerState& state)
         const int nativeFormatIndex = selectedFormat >= 0 && selectedFormat < static_cast<int>(state.cameraFormats.size())
             ? state.cameraFormats[selectedFormat].index
             : -1;
-        state.cameraPreviewEngine->startPreview(state.cameras[selected], state.preview, nativeFormatIndex);
+        state.cameraPreviewEngine->startPreview(state.cameras[selected], state.preview, nativeFormatIndex, state.fullRange, state.matrix);
     }
 }
 
@@ -232,7 +236,7 @@ LRESULT CALLBACK pickerWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
                 const int nativeFormatIndex = selectedFormat >= 0 && selectedFormat < static_cast<int>(state->cameraFormats.size())
                     ? state->cameraFormats[selectedFormat].index
                     : -1;
-                state->cameraPreviewEngine->startPreview(state->cameras[selectedCamera], state->preview, nativeFormatIndex);
+                state->cameraPreviewEngine->startPreview(state->cameras[selectedCamera], state->preview, nativeFormatIndex, state->fullRange, state->matrix);
             }
             return 0;
         }
@@ -271,6 +275,7 @@ void registerPickerWindowClass(HINSTANCE instance)
 
 MainWindow::MainWindow(HINSTANCE instance)
     : instance_(instance)
+    , logger_("MainWindow")
 {
 }
 
@@ -350,10 +355,20 @@ LRESULT MainWindow::handleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     switch (message) {
     case WM_CREATE:
         createControls(window);
+        PostMessageW(window, MessageStartupChecks, 0, 0);
+        return 0;
+    case MessageStartupChecks:
+        runStartupChecks();
         return 0;
     case WM_SIZE:
         layoutControls(LOWORD(lParam), HIWORD(lParam));
         return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+        info->ptMinTrackSize.x = 1120;
+        info->ptMinTrackSize.y = 820;
+        return 0;
+    }
     case WM_CTLCOLORSTATIC: {
         const auto deviceContext = reinterpret_cast<HDC>(wParam);
         SetBkMode(deviceContext, TRANSPARENT);
@@ -375,7 +390,15 @@ LRESULT MainWindow::handleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == ControlIdStream) {
-            SetWindowTextW(statusLabel_, L"Status: streaming pipeline not implemented yet");
+            if (streamingActive_) {
+                stopStreaming();
+            } else {
+                startStreaming();
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == ControlIdVideoCodec || LOWORD(wParam) == ControlIdHardwareAccel || LOWORD(wParam) == ControlIdColorMode || LOWORD(wParam) == ControlIdColorRange || LOWORD(wParam) == ControlIdColorMatrix) {
+            updateBandwidthPrediction();
             return 0;
         }
         if (LOWORD(wParam) == ControlIdSelectWindow) {
@@ -426,11 +449,11 @@ void MainWindow::createControls(HWND window)
     audioButton_ = createButton(window, L"System Audio", ControlIdAudio);
 
     configureLabel_ = createLabel(window, L"Configure", 0);
-    primaryEndpointLabel_ = createLabel(window, L"Window WebRTC endpoint", 0);
+    primaryEndpointLabel_ = createLabel(window, L"GameSzene SRT endpoint", 0);
     primaryEndpointEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"EDIT",
-        L"http://localhost:8889/live/window/whip",
+        L"srt://85.215.253.135:8893?streamid=publish:jericho_game&pkt_size=1316",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0,
         0,
@@ -440,11 +463,11 @@ void MainWindow::createControls(HWND window)
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ControlIdPrimaryEndpoint)),
         instance_,
         nullptr);
-    backupEndpointLabel_ = createLabel(window, L"Cam WebRTC endpoint", 0);
+    backupEndpointLabel_ = createLabel(window, L"CamSzene SRT endpoint", 0);
     backupEndpointEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"EDIT",
-        L"",
+        L"srt://85.215.253.135:8892?streamid=publish:headwig_game&pkt_size=1316",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         0,
         0,
@@ -476,11 +499,20 @@ void MainWindow::createControls(HWND window)
     SendMessageW(colorModeCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"YUV"));
     SendMessageW(colorModeCombo_, CB_SETCURSEL, 0, 0);
 
+    colorMatrixLabel_ = createLabel(window, L"YUV matrix", 0);
+    colorMatrixCombo_ = CreateWindowExW(0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 0, 0, 100, 120, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ControlIdColorMatrix)), instance_, nullptr);
+    SendMessageW(colorMatrixCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"BT.709"));
+    SendMessageW(colorMatrixCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"BT.601"));
+    SendMessageW(colorMatrixCombo_, CB_SETCURSEL, 0, 0);
+
     colorRangeLabel_ = createLabel(window, L"YUV range", 0);
     colorRangeCombo_ = CreateWindowExW(0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 0, 0, 100, 120, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ControlIdColorRange)), instance_, nullptr);
     SendMessageW(colorRangeCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Begrenzt / Limited"));
     SendMessageW(colorRangeCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Voll / Full"));
     SendMessageW(colorRangeCombo_, CB_SETCURSEL, 0, 0);
+
+    bandwidthLabel_ = createLabel(window, L"Bandwidth prediction", 0);
+    bandwidthValueLabel_ = createLabel(window, L"Estimated: 0 Mbps", 0);
 
     outputLabel_ = createLabel(window, L"Outputs", 0);
     primaryOutputButton_ = createButton(window, L"Use Window WebRTC", ControlIdPrimaryOutput);
@@ -508,7 +540,9 @@ void MainWindow::createControls(HWND window)
     SendMessageW(videoCodecCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
     SendMessageW(hardwareAccelCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
     SendMessageW(colorModeCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
+    SendMessageW(colorMatrixCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
     SendMessageW(colorRangeCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
+    SendMessageW(bandwidthValueLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
     SendMessageW(windowPreviewLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
     SendMessageW(camPreviewLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(monoFont_), TRUE);
 }
@@ -561,28 +595,57 @@ void MainWindow::layoutControls(int width, int height)
     MoveWindow(selectCameraButton_, sideX + 12, contentTop + 86, sideWidth - 24, buttonHeight, TRUE);
     MoveWindow(audioButton_, sideX + 12, contentTop + 128, sideWidth - 24, buttonHeight, TRUE);
 
-    MoveWindow(configureLabel_, sideX + 12, contentTop + 194, sideWidth - 24, 24, TRUE);
-    MoveWindow(primaryEndpointLabel_, sideX + 12, contentTop + 228, sideWidth - 24, 22, TRUE);
-    MoveWindow(primaryEndpointEdit_, sideX + 12, contentTop + 254, sideWidth - 24, 28, TRUE);
-    MoveWindow(backupEndpointLabel_, sideX + 12, contentTop + 292, sideWidth - 24, 22, TRUE);
-    MoveWindow(backupEndpointEdit_, sideX + 12, contentTop + 318, sideWidth - 24, 28, TRUE);
+    MoveWindow(configureLabel_, sideX + 12, contentTop + 178, sideWidth - 24, 22, TRUE);
+    MoveWindow(primaryEndpointLabel_, sideX + 12, contentTop + 204, sideWidth - 24, 20, TRUE);
+    MoveWindow(primaryEndpointEdit_, sideX + 12, contentTop + 226, sideWidth - 24, 26, TRUE);
+    MoveWindow(backupEndpointLabel_, sideX + 12, contentTop + 258, sideWidth - 24, 20, TRUE);
+    MoveWindow(backupEndpointEdit_, sideX + 12, contentTop + 280, sideWidth - 24, 26, TRUE);
 
-    MoveWindow(encoderLabel_, sideX + 12, contentTop + 366, sideWidth - 24, 24, TRUE);
-    MoveWindow(videoCodecLabel_, sideX + 12, contentTop + 398, 120, 22, TRUE);
-    MoveWindow(videoCodecCombo_, sideX + 150, contentTop + 394, sideWidth - 162, 120, TRUE);
-    MoveWindow(hardwareAccelLabel_, sideX + 12, contentTop + 432, 132, 22, TRUE);
-    MoveWindow(hardwareAccelCombo_, sideX + 150, contentTop + 428, sideWidth - 162, 120, TRUE);
-    MoveWindow(colorModeLabel_, sideX + 12, contentTop + 466, 120, 22, TRUE);
-    MoveWindow(colorModeCombo_, sideX + 150, contentTop + 462, sideWidth - 162, 120, TRUE);
-    MoveWindow(colorRangeLabel_, sideX + 12, contentTop + 500, 120, 22, TRUE);
-    MoveWindow(colorRangeCombo_, sideX + 150, contentTop + 496, sideWidth - 162, 120, TRUE);
+    MoveWindow(encoderLabel_, sideX + 12, contentTop + 318, sideWidth - 24, 22, TRUE);
+    MoveWindow(videoCodecLabel_, sideX + 12, contentTop + 344, 120, 20, TRUE);
+    MoveWindow(videoCodecCombo_, sideX + 150, contentTop + 340, sideWidth - 162, 120, TRUE);
+    MoveWindow(hardwareAccelLabel_, sideX + 12, contentTop + 374, 132, 20, TRUE);
+    MoveWindow(hardwareAccelCombo_, sideX + 150, contentTop + 370, sideWidth - 162, 120, TRUE);
+    MoveWindow(colorModeLabel_, sideX + 12, contentTop + 404, 120, 20, TRUE);
+    MoveWindow(colorModeCombo_, sideX + 150, contentTop + 400, sideWidth - 162, 120, TRUE);
+    MoveWindow(colorMatrixLabel_, sideX + 12, contentTop + 434, 120, 20, TRUE);
+    MoveWindow(colorMatrixCombo_, sideX + 150, contentTop + 430, sideWidth - 162, 120, TRUE);
+    MoveWindow(colorRangeLabel_, sideX + 12, contentTop + 464, 120, 20, TRUE);
+    MoveWindow(colorRangeCombo_, sideX + 150, contentTop + 460, sideWidth - 162, 120, TRUE);
 
-    MoveWindow(outputLabel_, sideX + 12, contentTop + 548, sideWidth - 24, 24, TRUE);
-    MoveWindow(primaryOutputButton_, sideX + 12, contentTop + 582, sideWidth - 24, buttonHeight, TRUE);
-    MoveWindow(backupOutputButton_, sideX + 12, contentTop + 624, sideWidth - 24, buttonHeight, TRUE);
-    MoveWindow(streamButton_, sideX + 12, height - statusHeight - margin - buttonHeight, sideWidth - 24, buttonHeight, TRUE);
+    MoveWindow(bandwidthLabel_, sideX + 12, contentTop + 500, sideWidth - 24, 20, TRUE);
+    MoveWindow(bandwidthValueLabel_, sideX + 12, contentTop + 524, sideWidth - 24, 24, TRUE);
+
+    MoveWindow(outputLabel_, sideX + 12, contentTop + 558, sideWidth - 24, 22, TRUE);
+    ShowWindow(primaryOutputButton_, SW_HIDE);
+    ShowWindow(backupOutputButton_, SW_HIDE);
+    const int streamTop = height - statusHeight - margin - buttonHeight - 10;
+    MoveWindow(streamButton_, sideX + 12, streamTop, sideWidth - 24, buttonHeight, TRUE);
     MoveWindow(statusLabel_, margin + 12, height - statusHeight - margin + 7, width - (margin * 2) - 24, 22, TRUE);
     InvalidateRect(window_, nullptr, TRUE);
+    updateBandwidthPrediction();
+}
+
+void MainWindow::updateBandwidthPrediction()
+{
+    if (bandwidthValueLabel_ == nullptr) {
+        return;
+    }
+
+    const double windowPixels = static_cast<double>(selectedWindowWidth_) * selectedWindowHeight_;
+    const double cameraPixels = static_cast<double>(selectedCameraWidth_) * selectedCameraHeight_;
+    const double windowMbps = (windowPixels * 30.0 * 0.085) / 1000000.0;
+    const double cameraMbps = (cameraPixels * selectedCameraFps_ * 0.070) / 1000000.0;
+    const double audioMbps = 0.128;
+    const double overheadMbps = 0.25;
+    const double total = windowMbps + cameraMbps + audioMbps + overheadMbps;
+
+    wchar_t text[192] {};
+    swprintf_s(
+        text,
+        L"Estimated: %.1f Mbps",
+        total);
+    SetWindowTextW(bandwidthValueLabel_, text);
 }
 
 void MainWindow::createThemeResources()
@@ -631,7 +694,7 @@ void MainWindow::paintBackground(HWND window)
     LineTo(deviceContext, clientRect.right, 55);
     SelectObject(deviceContext, cyanPen);
     MoveToEx(deviceContext, 0, 55, nullptr);
-    LineTo(deviceContext, 140, 55);
+    LineTo(deviceContext, min(140, clientRect.right), 55);
 
     const int margin = 18;
     const int sideWidth = 330;
@@ -661,10 +724,10 @@ void MainWindow::drawPanel(HDC deviceContext, const RECT& rect, const wchar_t* t
     const auto oldBrush = SelectObject(deviceContext, GetStockObject(HOLLOW_BRUSH));
     Rectangle(deviceContext, rect.left, rect.top, rect.right, rect.bottom);
     SelectObject(deviceContext, accentPen);
-    MoveToEx(deviceContext, rect.left, rect.top, nullptr);
-    LineTo(deviceContext, rect.left + 96, rect.top);
-    MoveToEx(deviceContext, rect.left, rect.top, nullptr);
-    LineTo(deviceContext, rect.left, rect.top + 28);
+    MoveToEx(deviceContext, rect.left + 1, rect.top + 1, nullptr);
+    LineTo(deviceContext, min(rect.left + 96, rect.right - 1), rect.top + 1);
+    MoveToEx(deviceContext, rect.left + 1, rect.top + 1, nullptr);
+    LineTo(deviceContext, rect.left + 1, min(rect.top + 28, rect.bottom - 1));
 
     SelectObject(deviceContext, monoFont_);
     SetBkMode(deviceContext, TRANSPARENT);
@@ -742,6 +805,168 @@ void MainWindow::layoutCameraPreview()
     MoveWindow(cameraPreview_, fitted.left, fitted.top, fitted.right - fitted.left, fitted.bottom - fitted.top, TRUE);
 }
 
+bool MainWindow::isFullRangeSelected() const
+{
+    if (colorRangeCombo_ == nullptr) {
+        return false;
+    }
+
+    return SendMessageW(colorRangeCombo_, CB_GETCURSEL, 0, 0) == 1;
+}
+
+YuvMatrix MainWindow::selectedYuvMatrix() const
+{
+    if (colorMatrixCombo_ == nullptr) {
+        return YuvMatrix::Bt709;
+    }
+
+    return SendMessageW(colorMatrixCombo_, CB_GETCURSEL, 0, 0) == 1 ? YuvMatrix::Bt601 : YuvMatrix::Bt709;
+}
+
+std::wstring MainWindow::readText(HWND control) const
+{
+    if (control == nullptr) {
+        return {};
+    }
+
+    const int length = GetWindowTextLengthW(control);
+    if (length <= 0) {
+        return {};
+    }
+
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(control, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+bool MainWindow::validateSrtEndpoint(const std::wstring& url) const
+{
+    if (url.rfind(L"srt://", 0) != 0) {
+        return false;
+    }
+
+    if (url.find(L"streamid=publish:") == std::wstring::npos) {
+        return false;
+    }
+
+    if (url.find(L"pkt_size=1316") == std::wstring::npos) {
+        return false;
+    }
+
+    return true;
+}
+
+void MainWindow::startStreaming()
+{
+    const std::wstring gameUrl = readText(primaryEndpointEdit_);
+    const std::wstring camUrl = readText(backupEndpointEdit_);
+
+    if (!validateSrtEndpoint(gameUrl)) {
+        SetWindowTextW(statusLabel_, L"Status: invalid GameSzene SRT endpoint");
+        logger_.error(L"Invalid GameSzene SRT endpoint: " + gameUrl);
+        return;
+    }
+
+    if (!validateSrtEndpoint(camUrl)) {
+        SetWindowTextW(statusLabel_, L"Status: invalid CamSzene SRT endpoint");
+        logger_.error(L"Invalid CamSzene SRT endpoint: " + camUrl);
+        return;
+    }
+
+    StreamSelection selection;
+    selection.windowTitle = selectedWindowTitle_;
+    selection.windowHandle = selectedWindowHandle_;
+    selection.cameraName = L"__camera_pipe__";
+    selection.cameraWidth = selectedCameraWidth_;
+    selection.cameraHeight = selectedCameraHeight_;
+    selection.cameraFps = selectedCameraFps_;
+    selection.cameraFromPreviewRegion = false;
+
+    StreamEndpoints endpoints;
+    endpoints.gameSrtUrl = gameUrl;
+    endpoints.camSrtUrl = camUrl;
+
+    SetWindowTextW(statusLabel_, L"Status: starting FFmpeg publishers...");
+
+    std::wstring error;
+    if (!publisher_.start(selection, endpoints, error)) {
+        const std::wstring status = L"Status: " + error;
+        SetWindowTextW(statusLabel_, status.c_str());
+        logger_.error(status);
+        return;
+    }
+
+    if (!publisher_.startCameraPipe(selectedCameraWidth_, selectedCameraHeight_, selectedCameraFps_, camUrl, error)) {
+        publisher_.stop();
+        const std::wstring status = L"Status: " + error;
+        SetWindowTextW(statusLabel_, status.c_str());
+        logger_.error(status);
+        return;
+    }
+
+    mediaFoundationCamera_.setFrameCallback([this](const BYTE* bgra, LONG width, LONG height) {
+        publisher_.submitCameraFrame(bgra, width, height);
+    });
+
+    streamingActive_ = true;
+    setStreamingControlsEnabled(false);
+    SetWindowTextW(streamButton_, L"Stop Stream");
+    const std::wstring status = publisher_.gameCaptureUsedFallback()
+        ? L"Status: streaming to GameSzene and CamSzene via FFmpeg/SRT (gfxcapture failed, using gdigrab fallback)"
+        : L"Status: streaming to GameSzene and CamSzene via FFmpeg/SRT";
+    SetWindowTextW(statusLabel_, status.c_str());
+    logger_.info(status);
+}
+
+void MainWindow::stopStreaming()
+{
+    mediaFoundationCamera_.setFrameCallback(nullptr);
+    publisher_.stop();
+    streamingActive_ = false;
+    setStreamingControlsEnabled(true);
+    SetWindowTextW(streamButton_, L"Start Stream");
+    SetWindowTextW(statusLabel_, L"Status: streaming stopped");
+    logger_.info("Streaming stopped");
+}
+
+void MainWindow::setStreamingControlsEnabled(bool enabled)
+{
+    EnableWindow(primaryEndpointEdit_, enabled);
+    EnableWindow(backupEndpointEdit_, enabled);
+    EnableWindow(videoCodecCombo_, enabled);
+    EnableWindow(hardwareAccelCombo_, enabled);
+    EnableWindow(colorModeCombo_, enabled);
+    EnableWindow(colorMatrixCombo_, enabled);
+    EnableWindow(colorRangeCombo_, enabled);
+    EnableWindow(selectWindowButton_, enabled);
+    EnableWindow(selectCameraButton_, enabled);
+}
+
+void MainWindow::runStartupChecks()
+{
+    if (startupChecksRan_) {
+        logger_.warning("Startup checks already ran; skipping duplicate request");
+        return;
+    }
+    startupChecksRan_ = true;
+
+    if (publisher_.available()) {
+        logger_.info("FFmpeg available for publisher backend");
+        SetWindowTextW(statusLabel_, L"Status: FFmpeg ready - streaming backend available");
+        return;
+    }
+
+    SetWindowTextW(statusLabel_, L"Status: FFmpeg missing - download required for streaming");
+    std::wstring error;
+    if (publisher_.installWithPrompt(window_, error)) {
+        SetWindowTextW(statusLabel_, L"Status: FFmpeg installed - streaming backend ready");
+    } else {
+        const std::wstring status = L"Status: " + error;
+        SetWindowTextW(statusLabel_, status.c_str());
+    }
+}
+
 void MainWindow::showWindowPicker()
 {
     if (pickerOpen_) {
@@ -756,6 +981,7 @@ void MainWindow::showWindowPicker()
 
     if (state.windows.empty()) {
         MessageBoxW(window_, L"No visible windows found.", L"CC-Streamer", MB_OK | MB_ICONINFORMATION);
+        logger_.warning("Window picker found no visible windows");
         pickerOpen_ = false;
         return;
     }
@@ -837,9 +1063,12 @@ void MainWindow::showCameraPicker()
     state.kind = PickerKind::Camera;
     state.cameras = MediaFoundationCamera::enumerateDevices();
     state.cameraPreviewEngine = &pickerCameraPreview_;
+    state.fullRange = isFullRangeSelected();
+    state.matrix = selectedYuvMatrix();
 
     if (state.cameras.empty()) {
         MessageBoxW(window_, L"No Media Foundation camera devices found.", L"CC-Streamer", MB_OK | MB_ICONINFORMATION);
+        logger_.warning("Camera picker found no Media Foundation camera devices");
         pickerOpen_ = false;
         return;
     }
@@ -891,9 +1120,19 @@ void MainWindow::showCameraPicker()
     SetForegroundWindow(window_);
 
     if (state.accepted && selected >= 0 && selected < static_cast<int>(state.cameras.size())) {
+        selectedCameraName_ = state.cameras[selected].name;
+        if (selectedFormat >= 0 && selectedFormat < static_cast<int>(state.cameraFormats.size())) {
+            selectedCameraWidth_ = static_cast<int>(state.cameraFormats[selectedFormat].width);
+            selectedCameraHeight_ = static_cast<int>(state.cameraFormats[selectedFormat].height);
+            selectedCameraFps_ = state.cameraFormats[selectedFormat].fpsDenominator == 0
+                ? 24
+                : static_cast<int>((static_cast<double>(state.cameraFormats[selectedFormat].fpsNumerator) / state.cameraFormats[selectedFormat].fpsDenominator) + 0.5);
+        }
         setCameraPreview(state.cameras[selected], nativeFormatIndex);
-        const std::wstring status = L"Cam Stream: " + state.cameras[selected].name;
+        const std::wstring matrix = selectedYuvMatrix() == YuvMatrix::Bt601 ? L"BT.601" : L"BT.709";
+        const std::wstring status = L"Cam Stream: " + state.cameras[selected].name + (isFullRangeSelected() ? L" - YUV full - " : L" - YUV limited - ") + matrix;
         SetWindowTextW(statusLabel_, status.c_str());
+        updateBandwidthPrediction();
     }
 
     pickerOpen_ = false;
@@ -902,6 +1141,15 @@ void MainWindow::showCameraPicker()
 void MainWindow::setWindowPreview(HWND sourceWindow)
 {
     clearWindowPreview();
+    selectedWindowHandle_ = sourceWindow;
+    wchar_t title[256] {};
+    GetWindowTextW(sourceWindow, title, 256);
+    selectedWindowTitle_ = title;
+    RECT sourceRect {};
+    if (GetWindowRect(sourceWindow, &sourceRect)) {
+        selectedWindowWidth_ = max(1, sourceRect.right - sourceRect.left);
+        selectedWindowHeight_ = max(1, sourceRect.bottom - sourceRect.top);
+    }
     ShowWindow(preview_, SW_HIDE);
     SetWindowTextW(preview_, L"");
 
@@ -920,7 +1168,10 @@ void MainWindow::setWindowPreview(HWND sourceWindow)
         DwmUpdateThumbnailProperties(windowThumbnail_, &properties);
     } else {
         SetWindowTextW(statusLabel_, L"Status: failed to create window preview thumbnail");
+        logger_.error("Failed to create DWM window preview thumbnail");
     }
+
+    updateBandwidthPrediction();
 }
 
 void MainWindow::setCameraPreview(const CameraDevice& camera, int formatIndex)
@@ -942,7 +1193,7 @@ void MainWindow::setCameraPreview(const CameraDevice& camera, int formatIndex)
         instance_,
         nullptr);
 
-    if (cameraPreview_ == nullptr || camera.symbolicLink.empty() || !mediaFoundationCamera_.startPreview(camera, cameraPreview_, formatIndex)) {
+    if (cameraPreview_ == nullptr || camera.symbolicLink.empty() || !mediaFoundationCamera_.startPreview(camera, cameraPreview_, formatIndex, isFullRangeSelected(), selectedYuvMatrix())) {
         if (cameraPreview_ != nullptr) {
             DestroyWindow(cameraPreview_);
             cameraPreview_ = nullptr;
@@ -950,8 +1201,10 @@ void MainWindow::setCameraPreview(const CameraDevice& camera, int formatIndex)
         const std::wstring error = mediaFoundationCamera_.lastError();
         const std::wstring status = error.empty() ? L"Status: failed to start camera preview" : L"Status: " + error;
         SetWindowTextW(statusLabel_, status.c_str());
+        logger_.error(status);
     } else {
         SetWindowTextW(cameraPreview_, L"Media Foundation preview starting...");
+        logger_.info(L"Camera preview starting: " + camera.name);
     }
 }
 

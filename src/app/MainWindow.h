@@ -1,9 +1,12 @@
 #pragma once
 
 #include "capture/MediaFoundationCamera.h"
+#include "logging/Logger.h"
+#include "streaming/FfmpegPublisher.h"
 
 #include <windows.h>
 #include <dwmapi.h>
+#include <string>
 
 namespace ccstreamer {
 
@@ -20,6 +23,7 @@ private:
     LRESULT handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     void createControls(HWND window);
     void layoutControls(int width, int height);
+    void updateBandwidthPrediction();
     void createThemeResources();
     void destroyThemeResources();
     void paintBackground(HWND window);
@@ -27,6 +31,14 @@ private:
     void drawOwnerButton(const DRAWITEMSTRUCT& item);
     RECT fitRectToAspect(const RECT& bounds, int aspectWidth, int aspectHeight) const;
     void layoutCameraPreview();
+    bool isFullRangeSelected() const;
+    YuvMatrix selectedYuvMatrix() const;
+    std::wstring readText(HWND control) const;
+    bool validateSrtEndpoint(const std::wstring& url) const;
+    void startStreaming();
+    void stopStreaming();
+    void setStreamingControlsEnabled(bool enabled);
+    void runStartupChecks();
     void showWindowPicker();
     void showCameraPicker();
     void setWindowPreview(HWND sourceWindow);
@@ -56,8 +68,12 @@ private:
     HWND hardwareAccelCombo_ = nullptr;
     HWND colorModeLabel_ = nullptr;
     HWND colorModeCombo_ = nullptr;
+    HWND colorMatrixLabel_ = nullptr;
+    HWND colorMatrixCombo_ = nullptr;
     HWND colorRangeLabel_ = nullptr;
     HWND colorRangeCombo_ = nullptr;
+    HWND bandwidthLabel_ = nullptr;
+    HWND bandwidthValueLabel_ = nullptr;
     HWND outputLabel_ = nullptr;
     HWND primaryOutputButton_ = nullptr;
     HWND backupOutputButton_ = nullptr;
@@ -68,11 +84,23 @@ private:
     HWND cameraPreview_ = nullptr;
     HTHUMBNAIL windowThumbnail_ = nullptr;
     MediaFoundationCamera pickerCameraPreview_;
+    Logger logger_;
     RECT previewRect_ {};
     RECT windowPreviewRect_ {};
     RECT camPreviewRect_ {};
     bool pickerOpen_ = false;
+    bool streamingActive_ = false;
+    bool startupChecksRan_ = false;
+    int selectedWindowWidth_ = 1920;
+    int selectedWindowHeight_ = 1080;
+    int selectedCameraWidth_ = 1920;
+    int selectedCameraHeight_ = 1080;
+    int selectedCameraFps_ = 24;
+    HWND selectedWindowHandle_ = nullptr;
+    std::wstring selectedWindowTitle_;
+    std::wstring selectedCameraName_;
     MediaFoundationCamera mediaFoundationCamera_;
+    FfmpegPublisher publisher_;
     HFONT titleFont_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT monoFont_ = nullptr;
