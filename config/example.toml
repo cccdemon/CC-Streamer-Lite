@@ -3,7 +3,10 @@ width = 1920
 height = 1080
 fps = 30
 bitrate_kbps = 6000
-encoder = "auto"
+codec = "h264"
+encoder = "hardware-auto"
+color_mode = "yuv"
+color_range = "limited"
 
 [audio]
 codec = "opus"
@@ -12,18 +15,33 @@ sample_rate = 48000
 channels = 2
 
 [[outputs]]
-name = "primary"
+name = "window"
 enabled = true
 protocol = "srt"
 url = "srt://stream.example.com:8890?streamid=publish:live/main"
 stream_key = ""
 srt_passphrase = ""
+webrtc_endpoint = "http://stream.example.com:8889/live/window/whip"
 
 [[outputs]]
-name = "backup"
+name = "camera"
 enabled = false
 protocol = "srt"
 url = "srt://backup.example.com:8890?streamid=publish:live/main"
 stream_key = ""
 srt_passphrase = ""
+webrtc_endpoint = ""
 
+[[webrtc_outputs]]
+name = "window"
+enabled = true
+protocol = "whip"
+endpoint = "http://stream.example.com:8889/live/window/whip"
+stream_key = ""
+
+[[webrtc_outputs]]
+name = "camera"
+enabled = false
+protocol = "whip"
+endpoint = "http://stream.example.com:8889/live/camera/whip"
+stream_key = ""

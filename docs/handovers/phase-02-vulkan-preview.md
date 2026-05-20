@@ -8,7 +8,7 @@ Replace the placeholder central widget with a Vulkan-backed preview surface.
 
 - Vulkan is the preferred compositor backend.
 - D3D11 remains necessary for Windows capture interop and fallback.
-- Current UI is a simple Qt main window.
+- Current UI is a simple Win32 main window.
 
 ## Own These Files
 
@@ -36,4 +36,3 @@ Replace the placeholder central widget with a Vulkan-backed preview surface.
 - Keep renderer lifecycle isolated from UI code.
 - Do not block the Qt event loop.
 - Avoid hidden dependency on a specific GPU vendor.
-

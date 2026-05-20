@@ -4,9 +4,8 @@
 
 - Windows 10/11 x64.
 - Visual Studio 2022 Build Tools with C++ workload.
-- CMake 3.24 or newer.
+- CMake 3.20 or newer.
 - Ninja.
-- Qt 6 with Widgets.
 - Vulkan SDK.
 
 ## Optional Later Dependencies
@@ -17,22 +16,21 @@
 ## Configure
 
 ```powershell
-cmake --preset windows-debug
+cmake --preset vs2019-x64-debug
 ```
 
 ## Build
 
 ```powershell
-cmake --build --preset windows-debug
+cmake --build --preset vs2019-x64-debug
 ```
 
 ## Run
 
 ```powershell
-.\build\windows-debug\CCStreamer.exe
+.\build\vs2019-x64\Debug\CCStreamer.exe
 ```
 
 ## Notes
 
-The current app is a foundation shell. Capture, encoding, and streaming modules are intentionally not implemented yet.
-
+The current app is a Win32 foundation shell. Capture, encoding, and streaming modules are intentionally not implemented yet.

@@ -1,13 +1,14 @@
 #pragma once
 
-#include <QString>
-#include <QVector>
+#include <string>
+#include <vector>
 
 namespace ccstreamer {
 
 enum class OutputProtocol {
     Srt,
     Rtsp,
+    Whip,
 };
 
 struct VideoProfile {
@@ -15,33 +16,35 @@ struct VideoProfile {
     int height = 1080;
     int fps = 30;
     int bitrateKbps = 6000;
-    QString encoder = "auto";
+    std::string codec = "h264";
+    std::string encoder = "hardware-auto";
+    std::string colorMode = "yuv";
+    std::string colorRange = "limited";
 };
 
 struct AudioProfile {
-    QString codec = "opus";
+    std::string codec = "opus";
     int bitrateKbps = 128;
     int sampleRate = 48000;
     int channels = 2;
 };
 
 struct OutputProfile {
-    QString name;
+    std::string name;
     bool enabled = false;
     OutputProtocol protocol = OutputProtocol::Srt;
-    QString url;
-    QString streamKey;
-    QString srtPassphrase;
+    std::string url;
+    std::string streamKey;
+    std::string srtPassphrase;
 };
 
 struct StreamProfile {
     VideoProfile video;
     AudioProfile audio;
-    QVector<OutputProfile> outputs;
+    std::vector<OutputProfile> outputs;
 };
 
-QString outputProtocolToString(OutputProtocol protocol);
-bool tryParseOutputProtocol(const QString& value, OutputProtocol& protocol);
+std::string outputProtocolToString(OutputProtocol protocol);
+bool tryParseOutputProtocol(const std::string& value, OutputProtocol& protocol);
 
 } // namespace ccstreamer
-

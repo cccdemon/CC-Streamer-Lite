@@ -1,13 +1,13 @@
 #include "logging/Logger.h"
 
-#include <QDebug>
-#include <QRegularExpression>
-
+#include <iostream>
+#include <regex>
 #include <utility>
+#include <windows.h>
 
 namespace ccstreamer {
 
-Logger::Logger(QString category)
+Logger::Logger(std::string category)
     : category_(std::move(category))
     , sensitiveKeys_({
           "stream_key",
@@ -22,39 +22,45 @@ Logger::Logger(QString category)
 {
 }
 
-void Logger::info(const QString& message) const
+void Logger::info(const std::string& message) const
 {
-    qInfo().noquote() << "[" + category_ + "]" << redact(message);
+    const auto line = "[INFO] [" + category_ + "] " + redact(message) + "\n";
+    OutputDebugStringA(line.c_str());
+    std::clog << line;
 }
 
-void Logger::warning(const QString& message) const
+void Logger::warning(const std::string& message) const
 {
-    qWarning().noquote() << "[" + category_ + "]" << redact(message);
+    const auto line = "[WARN] [" + category_ + "] " + redact(message) + "\n";
+    OutputDebugStringA(line.c_str());
+    std::clog << line;
 }
 
-void Logger::error(const QString& message) const
+void Logger::error(const std::string& message) const
 {
-    qCritical().noquote() << "[" + category_ + "]" << redact(message);
+    const auto line = "[ERROR] [" + category_ + "] " + redact(message) + "\n";
+    OutputDebugStringA(line.c_str());
+    std::cerr << line;
 }
 
-QString Logger::redact(const QString& message) const
+std::string Logger::redact(const std::string& message) const
 {
-    QString result = message;
+    std::string result = message;
 
     for (const auto& key : sensitiveKeys_) {
-        const QRegularExpression quotedPattern(
-            "(" + QRegularExpression::escape(key) + R"(\s*=\s*["'])([^"']+)(["'])",
-            QRegularExpression::CaseInsensitiveOption);
-        result.replace(quotedPattern, R"(\1[REDACTED]\3)");
+        const std::regex quotedPattern(
+            "(" + key + R"(\s*=\s*["'])([^"']+)(["']))",
+            std::regex_constants::icase);
+        result = std::regex_replace(result, quotedPattern, "$1[REDACTED]$3");
 
-        const QRegularExpression queryPattern(
-            "([?&]" + QRegularExpression::escape(key) + R"(=)([^&\s]+))",
-            QRegularExpression::CaseInsensitiveOption);
-        result.replace(queryPattern, R"(\1[REDACTED])");
+        const std::regex queryPattern(
+            "([?&]" + key + R"(=)([^&\s]+))",
+            std::regex_constants::icase);
+        result = std::regex_replace(result, queryPattern, "$1[REDACTED]");
     }
 
-    const QRegularExpression userInfoPattern(R"((://)([^:/@\s]+):([^@/\s]+)@)");
-    result.replace(userInfoPattern, R"(\1[REDACTED]:[REDACTED]@)");
+    const std::regex userInfoPattern(R"((://)([^:/@\s]+):([^@/\s]+)@)");
+    result = std::regex_replace(result, userInfoPattern, "$1[REDACTED]:[REDACTED]@");
 
     return result;
 }

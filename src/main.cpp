@@ -1,14 +1,19 @@
 #include "app/Application.h"
 
-#include <QApplication>
+#include <windows.h>
 
-int main(int argc, char* argv[])
+int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 {
-    QApplication qtApp(argc, argv);
+    ccstreamer::Application app(instance, showCommand);
+    const int result = app.run();
 
-    ccstreamer::Application app;
-    app.start();
+    if (result != 0) {
+        MessageBoxW(
+            nullptr,
+            L"CC-Streamer failed to start. Check the build output and local debug logs.",
+            L"CC-Streamer",
+            MB_OK | MB_ICONERROR);
+    }
 
-    return QApplication::exec();
+    return result;
 }
-

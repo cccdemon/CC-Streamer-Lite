@@ -4,7 +4,7 @@ Lightweight native Windows x64 streaming app.
 
 Current implementation status:
 
-- CMake + Qt app shell.
+- CMake + Win32 native app shell.
 - Redacting logger foundation.
 - Profile/config model foundation.
 - Vulkan-first architecture plan.

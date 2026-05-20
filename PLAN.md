@@ -9,6 +9,7 @@ Build a lightweight Windows x64 native streaming app, similar in purpose to OBS/
 - Audio encoded as Opus.
 - Stream to two configurable endpoints.
 - Optional video re-encode/downscale from 4K to 1080p or 1440p.
+- Video encoded as H.264 by default, with hardware acceleration preferred when available.
 - Primary target: configurable MediaMTX streaming server.
 
 ## Recommended Technical Direction
@@ -28,9 +29,11 @@ Use a native C++ application with:
 - Encoding:
   - FFmpeg libraries for muxing, transport, Opus audio, and fallback software video encode.
   - Hardware video encode where available: NVENC, Intel QSV, AMD AMF.
+  - Default video codec: H.264.
+  - Default color pipeline: YUV limited range, configurable to full range.
 - Streaming protocol:
   - Prefer SRT or RTSP/RTP for MediaMTX when Opus is required.
-  - WHIP/WebRTC is a good later target if browser playback and low latency are important.
+- WHIP/WebRTC is a good later target if browser playback and low latency are important.
   - RTMP can be supported later if the target server/client stack supports Enhanced RTMP with Opus. Do not make it the first ingest path because broader ecosystem compatibility is less predictable than SRT or RTSP for Opus.
 
 ## High-Level Architecture
@@ -129,6 +132,8 @@ stream_key = ""
 ```
 
 `stream_key` is optional. If it is empty, the app uses the URL as-is. If it is set, the output module appends or injects it according to the selected protocol and server profile. This allows both URL-only MediaMTX setups and hosted-style ingest setups that separate server URL from stream key.
+
+For MediaMTX WebRTC ingest, configure WHIP endpoints with the `/whip` suffix, for example `http://stream.example.com:8889/live/window/whip` and `http://stream.example.com:8889/live/camera/whip`.
 
 Secrets such as `stream_key`, `srt_passphrase`, usernames, passwords, and tokens must not be written to logs or crash reports. The config file may reference secrets during development, but production builds should support Windows Credential Manager so profiles can store only secret references.
 
